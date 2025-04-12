@@ -6,9 +6,9 @@ import numpy as np
 import torch
 from transformers import AutoTokenizer
 
-from multi_intent_classification.services.evaluate import TestingArguments
-from multi_intent_classification.services.dataloader import Dataset, LlmDataCollator
-from multi_intent_classification.services.trainer import TrainingArguments, BertRNNModel, BertLSTMModel
+from lstm_bert_classification.services.evaluate import TestingArguments
+from lstm_bert_classification.services.dataloader import Dataset, LlmDataCollator
+from lstm_bert_classification.services.trainer import TrainingArguments, BertRNNModel, BertLSTMModel
 
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
@@ -43,6 +43,7 @@ parser.add_argument("--learning_rate", type=float, default=3e-5, required=True)
 parser.add_argument("--weight_decay", type=float, default=0.01, required=True)
 parser.add_argument("--warmup_steps", type=int, default=50, required=True)
 parser.add_argument("--max_length", type=int, default=256, required=True)
+parser.add_argument("--max_seq_len", type=int, default=8, help="Maximum sequence length for the model", required=True)
 parser.add_argument("--pad_mask_id", type=int, default=-100, required=True)
 parser.add_argument("--model", type=str, default="vinai/phobert-base-v2", required=True)
 parser.add_argument("--pin_memory", dest="pin_memory", action="store_true", default=False)
@@ -86,7 +87,7 @@ if __name__ == "__main__":
         tokenizer=tokenizer,
         max_length=args.max_length,
         label_mapping=label2id,
-        max_seq_len=8,
+        max_seq_len=args.max_seq_len,
     )
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")

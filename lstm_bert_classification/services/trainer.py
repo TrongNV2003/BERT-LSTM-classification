@@ -9,7 +9,7 @@ from tqdm import tqdm
 from typing import Optional, Callable
 from sklearn.metrics import precision_score, recall_score, f1_score, hamming_loss
 
-from multi_intent_classification.services.utils import AverageMeter
+from lstm_bert_classification.services.utils import AverageMeter
 
 class BertLSTMModel(nn.Module):
     def __init__(self, bert_model_name: str, num_labels: int, lstm_hidden_size: int = 100, dropout: float = 0.1):
@@ -23,7 +23,7 @@ class BertLSTMModel(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.classifier = nn.Linear(lstm_hidden_size, num_labels)
 
-    def forward(self, input_ids, attention_mask, hidden=None):
+    def forward(self, input_ids, attention_mask, lengths, hidden=None):
         # input_ids: [batch_size, seq_len, max_length]
         batch_size, seq_len, max_length = input_ids.size()
 
@@ -39,16 +39,27 @@ class BertLSTMModel(nn.Module):
 
         # Reshape lại để đưa qua LSTM: [batch_size, seq_len, hidden_size]
         lstm_input = bert_hidden.view(batch_size, seq_len, -1)
-
+        pack_input = torch.nn.utils.rnn.pack_padded_sequence(
+            lstm_input,
+            lengths.cpu(),
+            batch_first=True,
+            enforce_sorted=False
+        )
+        
         # Khởi tạo hidden state nếu chưa được truyền vào
         if hidden is None:
             h0 = torch.zeros(1, batch_size, self.lstm.hidden_size).to(lstm_input.device)
             c0 = torch.zeros(1, batch_size, self.lstm.hidden_size).to(lstm_input.device)
             hidden = (h0, c0)
             
-        lstm_output, hidden = self.lstm(lstm_input, hidden)  # lstm_output: [batch_size, seq_len, lstm_hidden_size]
+        packed_output, hidden = self.lstm(pack_input, hidden)  # lstm_output: [batch_size, seq_len, lstm_hidden_size]
 
-        # Áp dụng dropout và phân loại
+        lstm_output, _ = torch.nn.utils.rnn.pad_packed_sequence(
+            packed_output,
+            batch_first=True,
+            total_length=seq_len
+        )  # [batch_size, seq_len, lstm_hidden_size]
+
         lstm_output = self.dropout(lstm_output)
         logits = self.classifier(lstm_output)  # [batch_size, seq_len, num_labels]
 
@@ -66,7 +77,7 @@ class BertRNNModel(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.classifier = nn.Linear(rnn_hidden_size, num_labels)
 
-    def forward(self, input_ids, attention_mask, hidden=None):
+    def forward(self, input_ids, attention_mask, lengths, hidden=None):
         # input_ids: [batch_size, seq_len, max_length]
         batch_size, seq_len, max_length = input_ids.size()
 
@@ -81,12 +92,23 @@ class BertRNNModel(nn.Module):
         # Reshape lại để đưa qua RNN
         rnn_input = bert_hidden.view(batch_size, seq_len, -1)  # [batch_size, seq_len, 768]
 
+        pack_input = torch.nn.utils.rnn.pack_padded_sequence(
+            rnn_input,
+            lengths.cpu(),
+            batch_first=True,
+            enforce_sorted=False
+        )
         # RNN forward
         if hidden is None:
             hidden = torch.zeros(1, batch_size, self.rnn.hidden_size).to(rnn_input.device)
-        rnn_output, hidden = self.rnn(rnn_input, hidden)  # rnn_output: [batch_size, seq_len, rnn_hidden_size]
+        packed_output, hidden = self.rnn(pack_input, hidden)  # rnn_output: [batch_size, seq_len, rnn_hidden_size]
 
-        # Dropout và phân loại
+        rnn_output, _ = torch.nn.utils.rnn.pad_packed_sequence(
+            packed_output,
+            batch_first=True,  # Ensure the output is in the same format
+            total_length=seq_len
+        )
+        
         rnn_output = self.dropout(rnn_output)
         logits = self.classifier(rnn_output)  # [batch_size, seq_len, num_labels]
 
@@ -180,10 +202,12 @@ class TrainingArguments:
                     input_ids = data["input_ids"].to(self.device)
                     attention_mask = data["attention_mask"].to(self.device)
                     labels = data["labels"].to(self.device)
+                    lengths = data["lengths"].to(self.device)
 
                     logits, _ = self.model(
                         input_ids=input_ids,
                         attention_mask=attention_mask,
+                        lengths=lengths,
                     )
                     loss = self.loss_fn(logits, labels)
 
@@ -245,10 +269,12 @@ class TrainingArguments:
                 input_ids = data["input_ids"].to(self.device)
                 attention_mask = data["attention_mask"].to(self.device)
                 labels = data["labels"].to(self.device)
+                lengths = data["lengths"].to(self.device)
 
                 logits, _ = self.model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
+                    lengths=lengths,
                 )
                 loss = self.loss_fn(logits, labels)
                 eval_loss.update(loss.item(), input_ids.size(0))

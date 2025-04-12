@@ -51,7 +51,11 @@ class TestingArguments:
                 lengths = batch["lengths"].to(self.device)
 
                 batch_start_time = time.time()
-                logits, _ = self.model(input_ids=input_ids, attention_mask=attention_mask)
+                logits, _ = self.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    lengths=lengths,
+                )
                 batch_end_time = time.time()
                 latency = batch_end_time - batch_start_time
                 latencies.append(latency)
