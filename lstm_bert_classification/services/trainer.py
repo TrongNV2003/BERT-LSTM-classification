@@ -18,7 +18,8 @@ class BertLSTMModel(nn.Module):
         self.lstm = nn.LSTM(
             input_size=self.bert.config.hidden_size,    # 768 dimensions
             hidden_size=lstm_hidden_size,
-            batch_first=True
+            batch_first=True,
+            bidirectional=True,
         )
         self.dropout = nn.Dropout(dropout)
         self.classifier = nn.Linear(lstm_hidden_size, num_labels)
@@ -203,6 +204,7 @@ class TrainingArguments:
                     attention_mask = data["attention_mask"].to(self.device)
                     labels = data["labels"].to(self.device)
                     lengths = data["lengths"].to(self.device)
+                    print("Lengths in batch:", lengths) # Debugging line
 
                     logits, _ = self.model(
                         input_ids=input_ids,
