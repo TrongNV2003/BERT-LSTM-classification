@@ -12,17 +12,17 @@ from sklearn.metrics import precision_score, recall_score, f1_score, hamming_los
 from lstm_bert_classification.services.utils import AverageMeter
 
 class BertLSTMModel(nn.Module):
-    def __init__(self, bert_model_name: str, num_labels: int, lstm_hidden_size: int = 100, dropout: float = 0.1):
+    def __init__(self, bert_model_name: str, num_labels: int, lstm_hidden_size: int = 100, dropout: float = 0.1, bidirectional: bool = False):
         super(BertLSTMModel, self).__init__()
         self.bert = AutoModel.from_pretrained(bert_model_name)
         self.lstm = nn.LSTM(
             input_size=self.bert.config.hidden_size,    # 768 dimensions
             hidden_size=lstm_hidden_size,
             batch_first=True,
-            bidirectional=True,
+            bidirectional=bidirectional,
         )
         self.dropout = nn.Dropout(dropout)
-        self.classifier = nn.Linear(lstm_hidden_size, num_labels)
+        self.classifier = nn.Linear(lstm_hidden_size * (2 if bidirectional else 1), num_labels)
 
     def forward(self, input_ids, attention_mask, lengths, hidden=None):
         # input_ids: [batch_size, seq_len, max_length]
@@ -49,8 +49,8 @@ class BertLSTMModel(nn.Module):
         
         # Khởi tạo hidden state nếu chưa được truyền vào
         if hidden is None:
-            h0 = torch.zeros(1, batch_size, self.lstm.hidden_size).to(lstm_input.device)
-            c0 = torch.zeros(1, batch_size, self.lstm.hidden_size).to(lstm_input.device)
+            h0 = torch.zeros((2 if self.lstm.bidirectional else 1), batch_size, self.lstm.hidden_size).to(lstm_input.device)
+            c0 = torch.zeros((2 if self.lstm.bidirectional else 1), batch_size, self.lstm.hidden_size).to(lstm_input.device)
             hidden = (h0, c0)
             
         packed_output, hidden = self.lstm(pack_input, hidden)  # lstm_output: [batch_size, seq_len, lstm_hidden_size]
@@ -204,7 +204,6 @@ class TrainingArguments:
                     attention_mask = data["attention_mask"].to(self.device)
                     labels = data["labels"].to(self.device)
                     lengths = data["lengths"].to(self.device)
-                    print("Lengths in batch:", lengths) # Debugging line
 
                     logits, _ = self.model(
                         input_ids=input_ids,

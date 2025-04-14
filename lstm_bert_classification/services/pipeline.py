@@ -58,6 +58,7 @@ parser.add_argument("--record_output_file", type=str, default="output.json")
 parser.add_argument("--early_stopping_patience", type=int, default=3, required=True)
 parser.add_argument("--early_stopping_threshold", type=float, default=0.001, required=True)
 parser.add_argument("--evaluate_on_accuracy", action="store_true", default=False)
+parser.add_argument("--model_type", type=str, default="lstm", choices=["rnn", "lstm"], required=True)
 args = parser.parse_args()
 
 def get_tokenizer(checkpoint: str) -> AutoTokenizer:
@@ -65,9 +66,13 @@ def get_tokenizer(checkpoint: str) -> AutoTokenizer:
     return tokenizer
 
 def get_model(
-    checkpoint: str, device: str, num_labels: str):
-    # model = BertRNNModel(bert_model_name=checkpoint, num_labels=num_labels)
-    model = BertLSTMModel(bert_model_name=checkpoint, num_labels=num_labels)
+    checkpoint: str, device: str, num_labels: str, model_type: str = "lstm"):
+    if model_type == "rnn":
+        model = BertRNNModel(bert_model_name=checkpoint, num_labels=num_labels)
+    elif model_type == "lstm":
+        model = BertLSTMModel(bert_model_name=checkpoint, num_labels=num_labels, bidirectional=True)
+    else:
+        raise ValueError(f"Unsupported model type: {model_type}. Choose 'rnn' or 'lstm'.")
     return model.to(device)
 
 if __name__ == "__main__":
@@ -91,7 +96,7 @@ if __name__ == "__main__":
     )
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    model = get_model(args.model, args.device, num_labels=len(unique_labels))
+    model = get_model(args.model, args.device, num_labels=len(unique_labels), model_type=args.model_type)
     
     count_parameters(model)
 
@@ -134,8 +139,7 @@ if __name__ == "__main__":
 
 
     # Test model
-    # tuned_model = BertRNNModel(f"{save_dir}", num_labels=len(unique_labels)).to(args.device)
-    tuned_model = BertLSTMModel(f"{save_dir}", num_labels=len(unique_labels)).to(args.device)
+    tuned_model = get_model(save_dir, args.device, num_labels=len(unique_labels), model_type=args.model_type)
     tuned_model.load_state_dict(torch.load(f"{save_dir}/pytorch_model.bin"))
     tester = TestingArguments(
         dataloader_workers=args.dataloader_workers,

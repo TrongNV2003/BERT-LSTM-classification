@@ -10,6 +10,7 @@ dialogue_dataset
 labels.txt
 
 result
+output.json
 evaluation_results.json
 
 models
