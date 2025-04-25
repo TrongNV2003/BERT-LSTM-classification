@@ -3,10 +3,12 @@ import time
 import numpy as np
 from tqdm import tqdm
 from typing import Dict, List, Optional, Callable
-from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score
+from sklearn.metrics import precision_score, recall_score, f1_score
 
 import torch
 from torch.utils.data import DataLoader, Dataset
+
+from lstm_bert_classification.utils import constant
 
 class TestingArguments:
     def __init__(
@@ -22,6 +24,8 @@ class TestingArguments:
         output_file: Optional[str] = None,
     ) -> None:
         self.output_file = output_file
+        self.id2label=id2label
+        
         self.device = device
         self.model = model.to(self.device)
         
@@ -33,15 +37,11 @@ class TestingArguments:
             shuffle=False,
             collate_fn=collate_fn,
         )
-        self.id2label=id2label
 
     def evaluate(self):
         self.model.eval()
-        results = []
-        latencies = []
-        all_preds = []
-        all_labels = []
-        all_masks = []
+        results, latencies = [], []
+        all_preds, all_labels = [], []
         
         with torch.no_grad():
             for batch in tqdm(self.test_loader, total=len(self.test_loader), unit="batches"):
@@ -49,81 +49,79 @@ class TestingArguments:
                 attention_mask = batch["attention_mask"].to(self.device)
                 labels = batch["labels"].to(self.device)
                 lengths = batch["lengths"].to(self.device)
+                turn_mask = batch["turn_mask"].to(self.device)
+                
+                batch_size = input_ids.shape[0]
+                batch_hidden = None
 
-                batch_start_time = time.time()
+                start = time.time()
                 logits, _ = self.model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     lengths=lengths,
+                    turn_mask=turn_mask,
+                    hidden=batch_hidden,
                 )
-                batch_end_time = time.time()
-                latency = batch_end_time - batch_start_time
+                latency = time.time() - start
                 latencies.append(latency)
 
-                probs = torch.sigmoid(logits)
-                batch_preds = (probs > 0.5).float().cpu().numpy()  # [batch_size, seq_len, num_labels]
-                batch_labels = labels.cpu().numpy()
-
-                batch_size, seq_len, _ = batch_preds.shape
-                valid_mask = np.zeros((batch_size, seq_len), dtype=bool)
-                lengths_np = lengths.cpu().numpy()
-                for i in range(batch_size):
-                    valid_mask[i, :int(lengths_np[i])] = True
-
-                valid_preds = batch_preds[valid_mask]
-                valid_labels = batch_labels[valid_mask]
-
-                
-                all_preds.append(valid_preds)
-                all_labels.append(valid_labels)
-                all_masks.append(valid_mask)
+                probs = torch.sigmoid(logits).cpu().numpy()
+                preds = (probs > 0.5)
+                labels_np = labels.cpu().numpy()
 
                 for i in range(batch_size):
-                    actual_length = int(lengths_np[i])
-                    for j in range(actual_length):
-                        true_label_names = self._map_labels(batch_labels[i, j], self.id2label)
-                        predicted_label_names = self._map_labels(batch_preds[i, j], self.id2label)
+                    valid_len = int(lengths[i].item())
+                    sample_preds = preds[i, :valid_len]         # [valid_len, num_labels]
+                    sample_labels = labels_np[i, :valid_len]    # [valid_len, num_labels]
+                    
+                    all_preds.append(sample_preds)
+                    all_labels.append(sample_labels)
+                    
+                    for j in range(valid_len):
+                        true_labels = self._map_labels(sample_labels[j], self.id2label)
+                        predicted_labels = self._map_labels(sample_preds[j], self.id2label)
+                        if not predicted_labels:
+                            predicted_labels = [self.id2label.get('UNKNOWN', constant.UNKNOWN_LABEL)]
+                            
                         results.append({
-                            "true_labels": true_label_names,
-                            "predicted_labels": predicted_label_names,
-                            "latency": float(latency) / (batch_size * actual_length),
+                            "true_labels": true_labels,
+                            "predicted_labels": predicted_labels,
+                            "latency": latency / batch_size / valid_len,
                         })
 
-        all_preds = np.concatenate(all_preds, axis=0)
-        all_labels = np.concatenate(all_labels, axis=0)
+        all_preds = np.vstack(all_preds)
+        all_labels = np.vstack(all_labels)
         
-        num_samples = len(results)
         if self.output_file:
             with open(self.output_file, "w", encoding="utf-8") as f:
                 json.dump(results, f, ensure_ascii=False, indent=4)
             print(f"Results saved to {self.output_file}")
 
         metrics = {}
-        for average_type in ["micro", "macro", "weighted"]:
-            avg_metrics = self._calculate_metrics(all_preds, all_labels, average_type)
-            metrics[average_type] = avg_metrics
-            self._print_metrics(avg_metrics, average_type)
-
+        for avg in ["micro", "macro", "weighted"]:
+            metrics[avg] = self._calculate_metrics(all_preds, all_labels, avg)
+            
         latency_stats = self._calculate_latency_stats(latencies)
         metrics["latency"] = latency_stats
-        print(f"num samples: {num_samples}")
         self._calculate_accuracy(results)
-
+        
+        num_samples = len(results)
+        print(f"num samples: {num_samples}")
+        return metrics
 
     def _map_labels(self, label_data: list, labels_mapping: dict) -> list:
         return [labels_mapping[idx] for idx, val in enumerate(label_data) if val == 1]
 
-
     def _calculate_metrics(self, all_preds: np.ndarray, all_labels: np.ndarray, average_type: str) -> Dict[str, float]:
         metrics = {}
-        sample_accuracy = (all_preds == all_labels).all(axis=1).mean()
-        metrics["accuracy"] = float(sample_accuracy)
         metrics["precision"] = float(precision_score(all_labels, all_preds, average=average_type, zero_division=0))
         metrics["recall"] = float(recall_score(all_labels, all_preds, average=average_type, zero_division=0))
         metrics["f1"] = float(f1_score(all_labels, all_preds, average=average_type, zero_division=0))
-
+        print(f"\nMetrics ({average_type}):")
+        print(f"Precision: {metrics['precision'] * 100:.2f}")
+        print(f"Recall: {metrics['recall'] * 100:.2f}")
+        print(f"F1 Score: {metrics['f1'] * 100:.2f}")
         return metrics
-
 
     def _calculate_accuracy(self, results):
         correct = 0
@@ -142,23 +140,14 @@ class TestingArguments:
         print(f"Accuracy (Match all): {accuracy * 100:.2f}%")
 
 
-    def _print_metrics(self, metrics: Dict[str, float], average_type: str) -> None:
-        print(f"\nMetrics ({average_type}):")
-        print(f"Accuracy: {metrics['accuracy'] * 100:.2f}")
-        print(f"Precision: {metrics['precision'] * 100:.2f}")
-        print(f"Recall: {metrics['recall'] * 100:.2f}")
-        print(f"F1 Score: {metrics['f1'] * 100:.2f}")
-
-
     def _calculate_latency_stats(self, latencies: List[float]) -> Dict[str, float]:
-        latency_stats = {
+        stats = {
             "p95_ms": float(np.percentile(latencies, 95) * 1000),
             "p99_ms": float(np.percentile(latencies, 99) * 1000),
             "mean_ms": float(np.mean(latencies) * 1000),
         }
         print("\nLatency Statistics:")
-        print(f"P95 Latency: {latency_stats['p95_ms']:.2f} ms")
-        print(f"P99 Latency: {latency_stats['p99_ms']:.2f} ms")
-        print(f"Mean Latency: {latency_stats['mean_ms']:.2f} ms")
-        
-        return latency_stats
+        print(f"P95 Latency: {stats['p95_ms']:.2f} ms")
+        print(f"P99 Latency: {stats['p99_ms']:.2f} ms")
+        print(f"Mean Latency: {stats['mean_ms']:.2f} ms")
+        return stats

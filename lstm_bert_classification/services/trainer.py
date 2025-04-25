@@ -2,118 +2,16 @@ import torch
 import torch.nn as nn
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
-from transformers import AutoTokenizer, get_scheduler, AutoModel
+from transformers import AutoTokenizer, get_scheduler
 
 import numpy as np
 from tqdm import tqdm
+from loguru import logger
 from typing import Optional, Callable
-from sklearn.metrics import precision_score, recall_score, f1_score, hamming_loss
+from sklearn.metrics import precision_score, recall_score, f1_score
 
-from lstm_bert_classification.services.utils import AverageMeter
-
-class BertLSTMModel(nn.Module):
-    def __init__(self, bert_model_name: str, num_labels: int, lstm_hidden_size: int = 100, dropout: float = 0.1, bidirectional: bool = False):
-        super(BertLSTMModel, self).__init__()
-        self.bert = AutoModel.from_pretrained(bert_model_name)
-        self.lstm = nn.LSTM(
-            input_size=self.bert.config.hidden_size,    # 768 dimensions
-            hidden_size=lstm_hidden_size,
-            batch_first=True,
-            bidirectional=bidirectional,
-        )
-        self.dropout = nn.Dropout(dropout)
-        self.classifier = nn.Linear(lstm_hidden_size * (2 if bidirectional else 1), num_labels)
-
-    def forward(self, input_ids, attention_mask, lengths, hidden=None):
-        # input_ids: [batch_size, seq_len, max_length]
-        batch_size, seq_len, max_length = input_ids.size()
-
-        # Reshape để đưa qua BERT
-        flat_input_ids = input_ids.view(-1, max_length)  # [batch_size * seq_len, max_length]
-        flat_attention_mask = attention_mask.view(-1, max_length)
-
-        # BERT forward
-        bert_outputs = self.bert(input_ids=flat_input_ids, attention_mask=flat_attention_mask)
-        
-        # Lấy token [CLS] từ kết quả của BERT: [batch_size * seq_len, hidden_size]
-        bert_hidden = bert_outputs.last_hidden_state[:, 0, :]
-
-        # Reshape lại để đưa qua LSTM: [batch_size, seq_len, hidden_size]
-        lstm_input = bert_hidden.view(batch_size, seq_len, -1)
-        pack_input = torch.nn.utils.rnn.pack_padded_sequence(
-            lstm_input,
-            lengths.cpu(),
-            batch_first=True,
-            enforce_sorted=False
-        )
-        
-        # Khởi tạo hidden state nếu chưa được truyền vào
-        if hidden is None:
-            h0 = torch.zeros((2 if self.lstm.bidirectional else 1), batch_size, self.lstm.hidden_size).to(lstm_input.device)
-            c0 = torch.zeros((2 if self.lstm.bidirectional else 1), batch_size, self.lstm.hidden_size).to(lstm_input.device)
-            hidden = (h0, c0)
-            
-        packed_output, hidden = self.lstm(pack_input, hidden)  # lstm_output: [batch_size, seq_len, lstm_hidden_size]
-
-        lstm_output, _ = torch.nn.utils.rnn.pad_packed_sequence(
-            packed_output,
-            batch_first=True,
-            total_length=seq_len
-        )  # [batch_size, seq_len, lstm_hidden_size]
-
-        lstm_output = self.dropout(lstm_output)
-        logits = self.classifier(lstm_output)  # [batch_size, seq_len, num_labels]
-
-        return logits, hidden
-
-class BertRNNModel(nn.Module):
-    def __init__(self, bert_model_name: str, num_labels: int, rnn_hidden_size: int = 100, dropout: float = 0.1):
-        super(BertRNNModel, self).__init__()
-        self.bert = AutoModel.from_pretrained(bert_model_name)
-        self.rnn = nn.RNN(
-            input_size=self.bert.config.hidden_size,  # 768 dimensions
-            hidden_size=rnn_hidden_size,
-            batch_first=True
-        )
-        self.dropout = nn.Dropout(dropout)
-        self.classifier = nn.Linear(rnn_hidden_size, num_labels)
-
-    def forward(self, input_ids, attention_mask, lengths, hidden=None):
-        # input_ids: [batch_size, seq_len, max_length]
-        batch_size, seq_len, max_length = input_ids.size()
-
-        # Reshape để đưa qua BERT
-        flat_input_ids = input_ids.view(-1, max_length)  # [batch_size * seq_len, max_length]
-        flat_attention_mask = attention_mask.view(-1, max_length)
-
-        # BERT forward
-        bert_outputs = self.bert(input_ids=flat_input_ids, attention_mask=flat_attention_mask)
-        bert_hidden = bert_outputs.last_hidden_state[:, 0, :]  # Lấy [CLS] token: [batch_size * seq_len, 768]
-
-        # Reshape lại để đưa qua RNN
-        rnn_input = bert_hidden.view(batch_size, seq_len, -1)  # [batch_size, seq_len, 768]
-
-        pack_input = torch.nn.utils.rnn.pack_padded_sequence(
-            rnn_input,
-            lengths.cpu(),
-            batch_first=True,
-            enforce_sorted=False
-        )
-        # RNN forward
-        if hidden is None:
-            hidden = torch.zeros(1, batch_size, self.rnn.hidden_size).to(rnn_input.device)
-        packed_output, hidden = self.rnn(pack_input, hidden)  # rnn_output: [batch_size, seq_len, rnn_hidden_size]
-
-        rnn_output, _ = torch.nn.utils.rnn.pad_packed_sequence(
-            packed_output,
-            batch_first=True,  # Ensure the output is in the same format
-            total_length=seq_len
-        )
-        
-        rnn_output = self.dropout(rnn_output)
-        logits = self.classifier(rnn_output)  # [batch_size, seq_len, num_labels]
-
-        return logits, hidden
+from lstm_bert_classification.utils.utils import AverageMeter
+from lstm_bert_classification.services.loss import LossFunctionFactory
 
 class TrainingArguments:
     def __init__(
@@ -136,12 +34,19 @@ class TrainingArguments:
         early_stopping_threshold: float = 0.001,
         evaluate_on_accuracy: bool = True,
         collator_fn: Optional[Callable] = None,
+        focal_loss_gamma: float = 2.0,
+        focal_loss_alpha: float = 0.25,
+        use_focal_loss: bool = True,
     ) -> None:
         self.device = device
         self.epochs = epochs
         self.save_dir = save_dir
         self.train_batch_size = train_batch_size
         self.valid_batch_size = valid_batch_size
+        
+        self.use_focal_loss = use_focal_loss
+        self.focal_loss_alpha = focal_loss_alpha
+        self.focal_loss_gamma = focal_loss_gamma
 
         self.train_loader = DataLoader(
             train_set,
@@ -161,6 +66,14 @@ class TrainingArguments:
         )
         self.tokenizer = tokenizer
         self.model = model.to(self.device)
+        self.loss_factory = LossFunctionFactory()
+        
+        if self.use_focal_loss:
+            self.loss_fn = self.loss_factory.get_loss("focal_with_pad_mask", gamma=self.focal_loss_gamma, alpha=self.focal_loss_alpha)
+            logger.info(f"Using Focal Loss with gamma={self.focal_loss_gamma} and alpha={self.focal_loss_alpha}")
+        else:
+            self.loss_fn = self.loss_factory.get_loss("bce_with_pad_mask")
+            logger.info("Using BCE Loss")
 
         no_decay = ["bias", "LayerNorm.weight"]
         optimizer_grouped_parameters = [
@@ -174,8 +87,6 @@ class TrainingArguments:
             },
         ]
         self.optimizer = AdamW(optimizer_grouped_parameters, lr=learning_rate)
-
-        self.loss_fn = nn.BCEWithLogitsLoss(reduction='mean')
 
         num_training_steps = len(self.train_loader) * epochs
         self.scheduler = get_scheduler(
@@ -192,36 +103,41 @@ class TrainingArguments:
         self.early_stopping_counter = 0
         self.best_epoch = 0
 
+
     def train(self) -> None:
+        logger.info(f"Using {'Focal Loss' if self.use_focal_loss else 'BCE Loss'} for training")
+        
         for epoch in range(1, self.epochs + 1):
             self.model.train()
             train_loss = AverageMeter()
 
-            with tqdm(total=len(self.train_loader), unit="batches") as tepoch:
-                tepoch.set_description(f"epoch {epoch}")
-                for data in self.train_loader:
-                    input_ids = data["input_ids"].to(self.device)
-                    attention_mask = data["attention_mask"].to(self.device)
-                    labels = data["labels"].to(self.device)
-                    lengths = data["lengths"].to(self.device)
+            for batch in tqdm(self.train_loader, desc=f"Epoch {epoch}"):
+                input_ids = batch["input_ids"].to(self.device)
+                attention_mask = batch["attention_mask"].to(self.device)
+                labels = batch["labels"].to(self.device)
+                lengths = batch["lengths"].to(self.device)
+                turn_mask = batch["turn_mask"].to(self.device)
+                
+                batch_hidden = None
+                self.optimizer.zero_grad()
+                logits, _ = self.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    lengths=lengths,
+                    turn_mask=turn_mask,
+                    hidden=batch_hidden
+                )
+                
+                # build mask for padding steps
+                pad_mask = turn_mask.unsqueeze(-1).float()
+                loss = self.loss_fn(logits, labels, pad_mask)
 
-                    logits, _ = self.model(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        lengths=lengths,
-                    )
-                    loss = self.loss_fn(logits, labels)
+                loss.backward()
+                nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                self.optimizer.step()
+                self.scheduler.step()
 
-                    self.optimizer.zero_grad()
-                    loss.backward()
-                    nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                    self.optimizer.step()
-                    self.scheduler.step()
-
-                    train_loss.update(loss.item(), input_ids.size(0))
-                    current_lr = self.optimizer.param_groups[0]["lr"]
-                    tepoch.set_postfix({"train_loss": train_loss.avg, "lr": current_lr})
-                    tepoch.update(1)
+                train_loss.update(loss.item(), input_ids.size(0))
 
             valid_score = self._validate(self.valid_loader)
             improved = False
@@ -263,7 +179,7 @@ class TrainingArguments:
         eval_loss = AverageMeter()
         all_preds = []
         all_labels = []
-
+        
         with tqdm(total=len(dataloader), unit="batches") as tepoch:
             tepoch.set_description("validation")
             for data in dataloader:
@@ -271,52 +187,57 @@ class TrainingArguments:
                 attention_mask = data["attention_mask"].to(self.device)
                 labels = data["labels"].to(self.device)
                 lengths = data["lengths"].to(self.device)
-
+                turn_mask = data["turn_mask"].to(self.device)
+                
+                batch_size = input_ids.size(0)
+                batch_hidden = None
+                
                 logits, _ = self.model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     lengths=lengths,
+                    hidden=batch_hidden,
                 )
-                loss = self.loss_fn(logits, labels)
+            
+                # build mask for padding steps
+                pad_mask = turn_mask.unsqueeze(-1).float()
+
+                loss = self.loss_fn(logits, labels, pad_mask)
+                
                 eval_loss.update(loss.item(), input_ids.size(0))
 
-                probs = torch.sigmoid(logits)  # [batch_size, seq_len, num_labels]
-                preds = (probs > 0.5).float().cpu().numpy()  # [batch_size, seq_len, num_labels]
-
-                # Flatten thành [batch_size * seq_len, num_labels]
-                preds_flat = preds.reshape(-1, preds.shape[-1])
-                labels_flat = labels.cpu().numpy().reshape(-1, labels.shape[-1])
+                probs = torch.sigmoid(logits)
+                preds = (probs > 0.5).float().cpu().numpy()
+                
+                for i in range(batch_size):
+                    valid_length = lengths[i].item()
+                    valid_preds = preds[i][:valid_length]
+                    valid_labels_np = labels[i][:valid_length].cpu().numpy()
                     
-                all_preds.append(preds_flat)
-                all_labels.append(labels_flat)
+                    all_preds.append(valid_preds)
+                    all_labels.append(valid_labels_np)
 
                 tepoch.set_postfix({"valid_loss": eval_loss.avg})
                 tepoch.update(1)
 
-        all_preds = np.concatenate(all_preds, axis=0)
-        all_labels = np.concatenate(all_labels, axis=0)
-
-        hamming_score = 1 - hamming_loss(all_labels, all_preds)
-        print(f"Hamming Score: {hamming_score * 100:.2f}%")
+        all_preds = np.vstack([p for p in all_preds if p.size > 0])
+        all_labels = np.vstack([l for l in all_labels if l.size > 0])
 
         accuracy = np.mean((all_preds == all_labels).all(axis=-1))
-        self._print_metrics(all_preds, all_labels, "micro")
+        self._metrics(all_preds, all_labels, "micro")
 
         return accuracy if self.evaluate_on_accuracy else eval_loss.avg
 
-
-    def _print_metrics(self, all_preds: np.ndarray, all_labels: np.ndarray, average_type: str) -> None:
+    def _metrics(self, all_preds: np.ndarray, all_labels: np.ndarray, average_type: str) -> None:
         accuracy = np.mean((all_preds == all_labels).all(axis=-1))
         precision = precision_score(all_labels, all_preds, average=average_type, zero_division=0)
         recall = recall_score(all_labels, all_preds, average=average_type, zero_division=0)
         f1 = f1_score(all_labels, all_preds, average=average_type, zero_division=0)
-
         print(f"\n=== Metrics ({average_type}) ===")
         print(f"Accuracy: {accuracy * 100:.2f}%")
         print(f"Precision: {precision * 100:.2f}%")
         print(f"Recall: {recall * 100:.2f}%")
         print(f"F1 Score: {f1 * 100:.2f}%")
-
 
     def _save(self) -> None:
         self.tokenizer.save_pretrained(self.save_dir)

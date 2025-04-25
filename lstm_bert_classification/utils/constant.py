@@ -1,0 +1,2 @@
+# unknown label
+UNKNOWN_LABEL = "UNKNOWN|UNKNOWN"
