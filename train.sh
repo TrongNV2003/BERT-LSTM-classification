@@ -21,7 +21,8 @@ python -m lstm_bert_classification.main \
     --record_output_file output.json \
     --early_stopping_patience 5 \
     --early_stopping_threshold 0.001 \
-    --evaluate_on_accuracy \
-    --use_focal_loss \
     --focal_loss_gamma 2.0 \
     --focal_loss_alpha 0.25 \
+    --use_focal_loss \
+    --dynamic_padding \
+    --evaluate_on_accuracy \
