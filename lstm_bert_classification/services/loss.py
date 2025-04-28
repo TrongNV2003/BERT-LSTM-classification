@@ -12,13 +12,15 @@ class CrossEntropyLoss(nn.Module):
         self.weight = weight
         self.reduction = reduction
         
-    def forward(self, inputs, targets):
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            inputs: Tensor shape (batch_size, num_classes)
+            logits: Tensor shape (batch_size, num_classes)
             targets: Tensor shape (batch_size)
         """
-        return F.cross_entropy(inputs, targets, weight=self.weight, reduction=self.reduction)
+        return F.cross_entropy(
+            logits, targets, weight=self.weight, reduction=self.reduction
+        )
 
 
 class WeightedCrossEntropyLoss(nn.Module):
@@ -30,13 +32,15 @@ class WeightedCrossEntropyLoss(nn.Module):
         self.class_weights = torch.tensor(class_weights, dtype=torch.float)
         self.reduction = reduction
         
-    def forward(self, inputs, targets):
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            inputs: Tensor shape (batch_size, num_classes)
+            logits: Tensor shape (batch_size, num_classes)
             targets: Tensor shape (batch_size)
         """
-        return F.cross_entropy(inputs, targets, weight=self.class_weights, reduction=self.reduction)
+        return F.cross_entropy(
+            logits, targets, weight=self.class_weights, reduction=self.reduction
+        )
 
 
 class FocalLossForSingleLabel(nn.Module):
@@ -51,36 +55,32 @@ class FocalLossForSingleLabel(nn.Module):
         self.gamma = gamma
         self.reduction = reduction
         
-    def forward(self, inputs, targets):
+    def forward(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            inputs: Tensor shape (batch_size, num_classes)
-            targets: Tensor shape (batch_size)
+            logits: Tensor chứa dự đoán từ mô hình, có shape (batch_size, num_classes).
+            labels: Tensor chứa nhãn thực tế (single-label), có shape (batch_size).
+        Returns:
+            Tensor: Giá trị Focal Loss.
         """
-        num_classes = inputs.size(1)
-        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
-        
-        pt = torch.exp(-ce_loss)
-        
-        focal_loss = (1 - pt) ** self.gamma * ce_loss
-        
-        if self.alpha is not None:
-            alpha_weight = torch.ones_like(focal_loss)
-            if isinstance(self.alpha, (list, tuple)):
-                assert len(self.alpha) == num_classes
-                for i in range(num_classes):
-                    alpha_weight[targets == i] = self.alpha[i]
-            else:
-                alpha_weight = torch.where(targets > 0, 1-self.alpha, self.alpha)
-            focal_loss = alpha_weight * focal_loss
-            
+        probs = torch.softmax(logits, dim=1)
+
+        labels_one_hot = F.one_hot(labels, num_classes=logits.size(1))
+        p_t = (probs * labels_one_hot).sum(dim=1)
+        modulating_factor = (1.0 - p_t) ** self.gamma
+
+        alpha_t = torch.where(labels_one_hot == 1, self.alpha, 1 - self.alpha).sum(dim=1)
+
+        ce_loss = -torch.log(p_t + 1e-8)
+
+        focal_loss = alpha_t * modulating_factor * ce_loss
+
         if self.reduction == 'mean':
             return focal_loss.mean()
         elif self.reduction == 'sum':
             return focal_loss.sum()
         else:
             return focal_loss
-
 
 class BinaryCrossEntropyLoss(nn.Module):
     """
@@ -91,14 +91,14 @@ class BinaryCrossEntropyLoss(nn.Module):
         self.weight = weight
         self.reduction = reduction
         
-    def forward(self, inputs, targets):
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            inputs: Tensor shape (batch_size, num_classes)
+            logits: Tensor shape (batch_size, num_classes)
             targets: Tensor shape (batch_size, num_classes)
         """
         return F.binary_cross_entropy_with_logits(
-            inputs, targets, weight=self.weight, reduction=self.reduction
+            logits, targets, weight=self.weight, reduction=self.reduction
         )
 
 
@@ -111,20 +111,23 @@ class WeightedBinaryCrossEntropyLoss(nn.Module):
         self.class_weights = torch.tensor(class_weights, dtype=torch.float)
         self.reduction = reduction
         
-    def forward(self, inputs, targets):
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            inputs: Tensor shape (batch_size, num_classes)
-            targets: Tensor shape (batch_size, num_classes)
+            logits: Tensor dự đoán từ mô hình, shape (batch_size, num_classes).
+            targets: Tensor nhãn thực tế, shape (batch_size, num_classes).
+        Returns:
+            Tensor: Giá trị Weighted Binary Cross-Entropy Loss.
         """
-        # Tạo weight cho từng mẫu và class
-        sample_weights = torch.ones_like(targets)
-        for i in range(self.class_weights.size(0)):
-            sample_weights[:, i] = self.class_weights[i]
-            
-        return F.binary_cross_entropy_with_logits(
-            inputs, targets, weight=sample_weights, reduction=self.reduction
+        if self.class_weights.device != logits.device:
+            self.class_weights = self.class_weights.to(logits.device)
+
+        sample_weights = self.class_weights.unsqueeze(0)  # Shape (1, num_classes)
+
+        loss = F.binary_cross_entropy_with_logits(
+            logits, targets, weight=sample_weights, reduction=self.reduction
         )
+        return loss
 
 
 class FocalLossForMultiLabel(nn.Module):
@@ -140,20 +143,31 @@ class FocalLossForMultiLabel(nn.Module):
         self.gamma = gamma
         self.reduction = reduction
         
-    def forward(self, inputs, targets):
+    def forward(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            inputs: Tensor shape (batch_size, num_classes)
-            targets: Tensor shape (batch_size, num_classes)
+            logits: Tensor shape (batch_size, num_classes)
+            labels: Tensor shape (batch_size, num_classes)
         """
-        BCE_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
-        probs = torch.sigmoid(inputs)
-        
-        p_t = torch.where(targets == 1, probs, 1-probs)
-        alpha_weight = torch.where(targets == 1, self.alpha, 1-self.alpha)
-        focal_weight = alpha_weight * (1 - p_t) ** self.gamma
-        focal_loss = focal_weight * BCE_loss
-        
+        bce_loss = F.binary_cross_entropy_with_logits(logits, labels, reduction='none')
+
+        probs = torch.sigmoid(logits)
+        p_t = probs * labels + (1 - probs) * (1 - labels)
+
+        modulating_factor = (1.0 - p_t) ** self.gamma
+
+        pos_counts = labels.sum(dim=0, keepdim=True)
+        neg_counts = (1 - labels).sum(dim=0, keepdim=True)
+        total = pos_counts + neg_counts
+
+        alpha_weight = torch.where(
+            labels > 0,
+            (total / (pos_counts + 1e-5)) * self.alpha,  # Trọng số cho nhãn dương
+            (total / (neg_counts + 1e-5)) * (1 - self.alpha)  # Trọng số cho nhãn âm
+        )
+
+        focal_loss = alpha_weight * modulating_factor * bce_loss
+
         if self.reduction == 'mean':
             return focal_loss.mean()
         elif self.reduction == 'sum':
