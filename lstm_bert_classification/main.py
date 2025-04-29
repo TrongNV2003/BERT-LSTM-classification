@@ -66,7 +66,7 @@ def get_model(checkpoint: str, device: str, num_labels: int, model_type: str) ->
         dropout=args.dropout,
         freeze_bert_layers=args.freeze_bert_layers,
         use_attention=False,
-        bidirectional=True,
+        bidirectional=False,
     )
     return model.to(device)
 
