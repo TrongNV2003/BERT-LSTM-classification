@@ -44,11 +44,11 @@ parser.add_argument("--learning_rate", type=float, default=3e-5, required=True)
 parser.add_argument("--weight_decay", type=float, default=0.01, required=True)
 parser.add_argument("--warmup_steps", type=int, default=100, required=True)
 parser.add_argument("--max_length", type=int, default=256, required=True)
-parser.add_argument("--pad_mask_id", type=int, default=-100, required=True)
+parser.add_argument("--pad_mask_id", type=int, default=-100)
 
 # RNN/LSTM arguments
 parser.add_argument("--model_type", type=str, default="lstm", choices=["rnn", "lstm"], required=True)
-parser.add_argument("--freeze_bert_layers", type=int, default=3, required=True)
+parser.add_argument("--freeze_bert_layers", type=int, default=0)
 parser.add_argument("--hidden_size", type=int, default=100)
 parser.add_argument("--dropout", type=float, default=0.1)
 args = parser.parse_args()

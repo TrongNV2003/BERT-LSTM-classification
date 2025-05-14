@@ -7,8 +7,8 @@ python -m lstm_bert_classification.main \
     --warmup_steps 500 \
     --max_length 256 \
     --max_seq_len 6 \
-    --pad_mask_id -100 \
     --model vinai/phobert-base-v2 \
+    --pin_memory \
     --freeze_bert_layers 0 \
     --model_type lstm \
     --train_batch_size 16 \
